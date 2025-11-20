@@ -1,0 +1,6 @@
+(library
+ (name capsule)
+ (public_name capsule)
+ (libraries base capsule0.blocking_sync capsule0.expert)
+ (preprocess
+  (pps ppx_sexp_conv ppx_template)))
