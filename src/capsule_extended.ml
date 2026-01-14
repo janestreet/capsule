@@ -20,9 +20,16 @@ module Data = struct
   let%template[@mode global shared] unwrap = Expert.Data.unwrap_shared
   let return = Expert.Data.inject
   let get_id = Expert.Data.project
+  let project_shared = Expert.Data.project_shared
   let both = Expert.Data.both
   let fst = Expert.Data.fst
   let snd = Expert.Data.snd
+
+  [%%template
+  [@@@mode.default unique]
+
+  let create = Expert.Data.create_unique
+  let unwrap = Expert.Data.unwrap_unique]
 
   [%%template
   [@@@mode.default local]
@@ -30,8 +37,10 @@ module Data = struct
   let wrap = Expert.Data.Local.wrap
   let unwrap = Expert.Data.Local.unwrap
   let[@mode local shared] unwrap = Expert.Data.Local.unwrap_shared
+  let[@mode local unique] unwrap = Expert.Data.Local.unwrap_unique
   let return = Expert.Data.Local.inject
   let get_id = Expert.Data.Local.project
+  let project_shared = Expert.Data.Local.project_shared
   let both = Expert.Data.Local.both
   let fst = Expert.Data.Local.fst
   let snd = Expert.Data.Local.snd]
@@ -131,32 +140,92 @@ module Initial = struct
 end
 
 module Isolated = struct
-  type ('a, 'k) inner : (value & void) mod contended portable =
-    #{ data : ('a, 'k) Data.t @@ aliased
-     ; key : 'k Expert.Key.t @@ global
+  type%template ('a, 'k) inner : (value & void) mod contended portable =
+    #{ data : ('a, 'k) Data.t @@ u
+     ; key : 'k Expert.Key.t
      }
+  [@@modality.explicit u = (unique, aliased)]
 
-  type 'a t : (value & void) mod contended portable = P : ('a, 'k) inner -> 'a t
-  [@@unboxed]
+  type%template ('a, 'k) inner = (('a, 'k) inner[@modality.explicit aliased])
 
-  type 'a boxed : value mod contended portable
+  include%template struct
+    [@@@mode.default u = (unique, aliased)]
 
-  external unsafe_box : ('a, 'k) Data.t -> 'a boxed @ unique @@ portable = "%identity"
-  external unsafe_unbox : 'a boxed @ unique -> ('a, 'k) Data.t @@ portable = "%identity"
+    type 'a t : (value & void) mod contended portable =
+      | P : (('a, 'k) inner[@mode u]) -> ('a t[@mode u])
+    [@@unboxed]
 
-  let box (P #{ data; key = _ }) = unsafe_box data
+    type 'a boxed : value mod contended portable
 
-  let unbox boxed =
-    let (P key) = Expert.create () in
-    let data = unsafe_unbox boxed in
-    P #{ data; key }
-  ;;
+    external unsafe_box
+      :  ('a, 'k) Data.t
+      -> ('a boxed[@mode u]) @ unique
+      @@ portable
+      = "%identity"
 
-  let create f =
-    let (P key) = Expert.create () in
-    let data = Data.create f in
-    P #{ key; data }
-  ;;
+    external unsafe_unbox
+      :  ('a boxed[@mode u]) @ unique
+      -> ('a, 'k) Data.t @ unique
+      @@ portable
+      = "%identity"
+
+    external unsafe_box_aliased
+      :  ('a, 'k) Data.t
+      -> ('a boxed[@mode u])
+      @@ portable
+      = "%identity"
+
+    external unsafe_unbox_aliased
+      :  ('a boxed[@mode u])
+      -> ('a, 'k) Data.t
+      @@ portable
+      = "%identity"
+
+    let box (P #{ data; key = _ }) = (unsafe_box [@mode u]) data
+
+    let unbox boxed : (_ t[@mode u]) @ unique =
+      let (P key) = Expert.create () in
+      let data = (unsafe_unbox [@mode u]) boxed in
+      P #{ data; key }
+    ;;
+
+    let box_aliased (P #{ data; key = _ }) = (unsafe_box_aliased [@mode u]) data
+
+    let unbox_aliased boxed : (_ t[@mode u]) =
+      let (P key) = Expert.create () in
+      let data = (unsafe_unbox_aliased [@mode u]) boxed in
+      P #{ data; key }
+    ;;
+
+    let create f : (_ t[@mode u]) @ unique =
+      let (P key) = Expert.create () in
+      let data = (Data.create [@mode u]) f in
+      P #{ key; data }
+    ;;
+
+    let with_shared_gen (P #{ key; data }) ~f =
+      (Expert.Key.access_shared key ~f:(fun access ->
+         { aliased = { many = f (Expert.Data.unwrap_shared ~access data) } })
+      [@nontail])
+        .aliased
+        .many
+    ;;
+
+    let with_shared = (with_shared_gen [@mode u])
+
+    [@@@mode.default l = (global, local)]
+
+    let unwrap (P #{ key; data } : (_ t[@mode u])) =
+      let access = Expert.Key.destroy key in
+      (Data.unwrap [@mode l u]) ~access data [@exclave_if_local l]
+    ;;
+
+    let unwrap_shared (P #{ key; data } : (_ t[@mode u])) =
+      (Data.project_shared [@mode l]) ~key data [@exclave_if_local l]
+    ;;
+  end
+
+  let get_id (P #{ data; key }) = #(P #{ data; key }, { aliased = Data.get_id data })
 
   let with_unique_gen (P #{ key; data }) ~f =
     let #(result, key) =
@@ -167,33 +236,6 @@ module Isolated = struct
   ;;
 
   let with_unique t ~f = with_unique_gen t ~f:(fun x -> { aliased = f x }) [@nontail]
-
-  let with_shared_gen (P #{ key; data }) ~f =
-    (Expert.Key.access_shared key ~f:(fun access ->
-       { aliased = { many = f (Expert.Data.unwrap_shared ~access data) } })
-    [@nontail])
-      .aliased
-      .many
-  ;;
-
-  let with_shared = with_shared_gen
-  let unwrap_shared (P #{ key; data }) = Expert.Data.project_shared ~key data
-
-  let%template[@mode local] unwrap_shared (P #{ key; data }) = exclave_
-    Expert.Data.Local.project_shared ~key data
-  ;;
-
-  let unwrap (P #{ key; data }) =
-    let access = Expert.Key.destroy key in
-    Expert.Data.unwrap ~access data
-  ;;
-
-  let%template[@mode local] unwrap (P #{ key; data }) =
-    let access = Expert.Key.destroy key in
-    exclave_ Expert.Data.Local.unwrap ~access data
-  ;;
-
-  let get_id (P #{ data; key }) = #(P #{ data; key }, { aliased = Data.get_id data })
 end
 
 module Guard = struct
@@ -209,8 +251,8 @@ module Guard = struct
     let (P access) = Access.current () in
     let data = Data.wrap ~access a in
     (Expert.Password.with_current access (fun password -> exclave_
-       { aliased = { global = f (P #{ data; password }) } }))
-      .aliased
+       { aliased_many = { global = f (P #{ data; password }) } }))
+      .aliased_many
       .global
   ;;
 
@@ -247,12 +289,13 @@ module Shared = struct
     let[@inline] with_ data { f } =
       let (P access) = Access.current () in
       let data = Data.wrap ~access { shared = data } in
-      let { global = { aliased = data } } =
+      let { many = { global = { aliased = data } } } =
         Expert.Password.with_current access (fun [@inline] password ->
           let password = Expert.Password.shared password in
-          Expert.Password.Shared.borrow password (fun [@inline] password ->
-            { global = { aliased = f #{ data; password } } })
-          [@nontail])
+          { many =
+              Expert.Password.Shared.borrow password (fun [@inline] password ->
+                { global = { aliased = f #{ data; password } } })
+          })
       in
       Expert.Data.Shared.unwrap ~access data
     ;;
@@ -276,9 +319,11 @@ module Shared = struct
     let data = Data.wrap ~access { shared = data } in
     (Expert.Password.with_current access (fun [@inline] password ->
        let password = Expert.Password.shared password in
-       Expert.Password.Shared.borrow password (fun [@inline] password ->
-         { global = { aliased = f (P #{ data; password }) } })
-       [@nontail]))
+       { many =
+           Expert.Password.Shared.borrow password (fun [@inline] password ->
+             { global = { aliased = f (P #{ data; password }) } })
+       }))
+      .many
       .global
       .aliased
   ;;

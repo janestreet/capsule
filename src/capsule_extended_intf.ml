@@ -30,7 +30,8 @@ module type Capsule = sig @@ portable
 
     (** These functions are the most common way to interact with capsules. *)
 
-    val create : (unit -> 'a) @ local once portable -> ('a, 'k) t
+    val%template create : (unit -> 'a @ u) @ local once portable -> ('a, 'k) t @ u
+    [@@mode u = (unique, aliased)]
 
     [%%template:
     [@@@mode.default l = (global, local)]
@@ -55,10 +56,16 @@ module type Capsule = sig @@ portable
   end
 
   module Isolated : sig
-    type ('a, 'k) inner : (value & void) mod contended portable =
-      #{ data : ('a, 'k) Data.t @@ aliased
-       ; key : 'k Capsule.Key.t @@ global
+    type%template ('a, 'k) inner : (value & void) mod contended portable =
+      #{ data : ('a, 'k) Data.t @@ u
+       ; key : 'k Capsule.Key.t
        }
+    [@@modality.explicit u = (unique, aliased)]
+
+    type%template ('a, 'k) inner = (('a, 'k) inner[@modality.explicit aliased])
+
+    [%%template:
+    [@@@mode.default u = (unique, aliased)]
 
     (** A value isolated within its own capsule.
 
@@ -67,21 +74,53 @@ module type Capsule = sig @@ portable
         underlying ['a]. [aliased] access to an ['a Capsule.Isolated.t] allows [shared]
         access to the underlying ['a].
 
-        Importantly, since uniqueness is being used to track contention, the contents of a
-        ['a t] are necessarily aliased, so having a ['a t @ unique] does not allow you to
-        get ['a @ unique]. *)
-    type 'a t : (value & void) mod contended portable = P : ('a, 'k) inner -> 'a t
+        This type is templated over the uniqueness of the underlying ['a], defaulting to
+        the [aliased] mode. So if you have a ['a Capsule.Isolated.t @ unique], you can
+        only access the inner ['a @ aliased], but if you have an
+        [('a Capsule.Isolated.t[@mode unique]) @ unique], you can access the inner
+        ['a @ unique] *)
+    type 'a t : (value & void) mod contended portable =
+      | P : (('a, 'k) inner[@mode u]) -> ('a t[@mode u])
     [@@unboxed]
 
     (** A boxed representation of {{!t} an isolated value}. *)
     type 'a boxed : value mod contended portable
 
-    val box : 'a t @ unique -> 'a boxed @ unique
-    val unbox : 'a boxed @ unique -> 'a t @ unique
+    val box : ('a t[@mode u]) @ unique -> ('a boxed[@mode u]) @ unique
+    val unbox : ('a boxed[@mode u]) @ unique -> ('a t[@mode u]) @ unique
+    val box_aliased : ('a t[@mode u]) -> ('a boxed[@mode u])
+    val unbox_aliased : ('a boxed[@mode u]) -> ('a t[@mode u])
 
     (** [create f] runs [f] within a fresh capsule, and creates a [Capsule.Isolated.t]
         containing the result. *)
-    val create : (unit -> 'a) @ local once portable -> 'a t @ unique
+    val create : (unit -> 'a @ u) @ local once portable -> ('a t[@mode u]) @ unique
+
+    (** [with_shared t ~f] takes an [aliased] isolated capsule [t], calls [f] with shared
+        access to its value, and returns the result of [f]. *)
+    val with_shared
+      : ('a : value mod portable) 'b.
+      ('a t[@mode u])
+      -> f:('a @ shared -> 'b @ contended portable) @ local once portable
+      -> 'b @ contended portable
+
+    [@@@mode.default l = (global, local)]
+
+    (** [unwrap t ~f] takes a [unique] isolated capsule [t] and returns the underlying
+        value, merging the capsule with the current capsule. *)
+    val unwrap : ('a t[@mode u]) @ l unique -> 'a @ l u
+
+    (** [unwrap_shared t ~f] takes an [aliased] isolated capsule [t] and returns the
+        underlying value at [shared]. *)
+    val unwrap_shared : ('a : value mod portable). ('a t[@mode u]) @ l -> 'a @ l shared]
+
+    (*_ Note that the following functions rely on the fact that the inner ['a] is aliased,
+        so only work on the version of [t] with aliased data. *)
+
+    (** Project out a contended reference to the underlying value from a unique [t],
+        returning the unique [t] back alongside the alias to the underlying value. *)
+    val get_id
+      : ('a : value mod portable).
+      'a t @ unique -> #('a t * 'a Modes.Aliased.t) @ contended unique
 
     (** [with_unique t ~f] takes a [unique] isolated capsule [t], calls [f] with its
         value, and returns a tuple of the unique isolated capsule and the result of [f]. *)
@@ -96,30 +135,6 @@ module type Capsule = sig @@ portable
       :  'a t @ unique
       -> f:('a -> 'b @ contended portable unique) @ local once portable
       -> #('a t * 'b) @ contended portable unique
-
-    (** [with_shared t ~f] takes an [aliased] isolated capsule [t], calls [f] with shared
-        access to its value, and returns the result of [f]. *)
-    val with_shared
-      : ('a : value mod portable) 'b.
-      'a t
-      -> f:('a @ shared -> 'b @ contended portable) @ local once portable
-      -> 'b @ contended portable
-
-    (** [unwrap t ~f] takes a [unique] isolated capsule [t] and returns the underlying
-        value, merging the capsule with the current capsule. *)
-    val%template unwrap : 'a t @ l unique -> 'a @ l
-    [@@mode l = (global, local)]
-
-    (** [unwrap_shared t ~f] takes an [aliased] isolated capsule [t] and returns the
-        underlying value at [shared]. *)
-    val%template unwrap_shared : ('a : value mod portable). 'a t @ l -> 'a @ l shared
-    [@@mode l = (global, local)]
-
-    (** Project out a contended reference to the underlying value from a unique [t],
-        returning the unique [t] back alongside the alias to the underlying value. *)
-    val get_id
-      : ('a : value mod portable).
-      'a t @ unique -> #('a t * 'a Modes.Aliased.t) @ contended unique
   end
 
   module Guard : sig
