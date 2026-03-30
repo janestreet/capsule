@@ -51,88 +51,14 @@ module Initial = struct
 
   let access = Expert.initial
 
-  let with_access_opt ~f =
-    (Expert.access_initial (fun access -> { global = { aliased = f access } })).global
-      .aliased
-  ;;
-
-  let%template with_access_opt ~f =
-    (Expert.access_initial (fun access -> { aliased = f access })).aliased
-  [@@alloc a @ l = stack_local]
-  ;;
-
-  let with_access_domain_opt ~f =
-    (Expert.access_initial_domain (fun access -> { global = { aliased = f access } }))
-      .global
-      .aliased
-  ;;
-
-  let%template with_access_domain_opt ~f =
-    (Expert.access_initial_domain (fun access -> { aliased = f access })).aliased
-  [@@alloc a @ l = stack_local]
-  ;;
-
   module Data = struct
     type 'a t = ('a, k) Data.t
 
     [%%template
     [@@@mode.default l = (global, local)]
 
-    let wrap a =
-      let access = Access.unbox access in
-      (Data.wrap [@mode l]) ~access a [@exclave_if_local l]
-    ;;
-
-    let unwrap a =
-      let access = Access.unbox access in
-      (Data.unwrap [@mode l]) ~access a [@exclave_if_local l]
-    ;;]
-
-    [%%template
-    [@@@alloc.default a @ l = (heap_global, stack_local)]
-
-    let[@inline] get_opt a ~f =
-      (with_access_opt [@alloc a]) ~f:(fun access ->
-        match[@exclave_if_stack a] access with
-        | Some access ->
-          Some (f ((Data.unwrap [@mode l]) ~access:(Access.unbox access) a))
-        | None -> None)
-      [@exclave_if_stack a] [@nontail]
-    ;;
-
-    (* NOTE: This isn't defined in terms of [get_opt] to avoid allocating the extra option *)
-    let if_on_initial a ~f =
-      (with_access_opt [@alloc a]) ~f:(fun access ->
-        match access with
-        | Some access ->
-          f ((Data.unwrap [@mode l]) ~access:(Access.unbox access) a) [@nontail]
-        | None -> ())
-      [@nontail]
-    ;;
-
-    (* NOTE: This isn't defined in terms of [get_opt] to avoid allocating the extra option *)
-    let if_on_initial_domain a ~f =
-      (with_access_domain_opt [@alloc a]) ~f:(fun access ->
-        match access with
-        | Some access ->
-          f ((Data.unwrap [@mode l]) ~access:(Access.unbox access) a) [@nontail]
-        | None -> ())
-      [@nontail]
-    ;;
-
-    let get_exn a ~f =
-      (with_access_opt [@alloc a]) ~f:(fun access ->
-        match[@exclave_if_stack a] access with
-        | Some access ->
-          f ((Data.unwrap [@mode l]) ~access:(Access.unbox access) a) [@nontail]
-        | None ->
-          failwith
-            "[Capsule.Initial.Data.get_exn] called from a capsule other than the initial \
-             capsule.")
-      [@exclave_if_stack a] [@nontail]
-    ;;
-
-    let iter_exn a ~f = (get_exn [@alloc a]) a ~f:(fun b : unit -> f b) [@nontail]]
+    let wrap a = (Data.wrap [@mode l]) ~access a [@exclave_if_local l]
+    let unwrap a = (Data.unwrap [@mode l]) ~access a [@exclave_if_local l]]
 
     let sexp_of_t sexp_of_a t = sexp_of_a (unwrap t)
     let t_of_sexp a_of_sexp a = wrap (a_of_sexp a)
@@ -243,72 +169,73 @@ module Guard = struct
   let[@inline] map (P { data; password }) ~f =
     P { data = Expert.Data.map data ~password ~f; password }
   ;;
-end
 
-module Shared = struct
-  type ('a, 'k) inner =
-    { data : ('a shared, 'k) Data.t
-    ; password : 'k Expert.Password.Shared.t
-    }
-
-  type 'a t = P : ('a, 'k) inner -> 'a t [@@unboxed]
-
-  module Uncontended = struct
-    type ('a, 'k) t = ('a, 'k) inner =
+  module Shared = struct
+    type ('a, 'k) inner =
       { data : ('a shared, 'k) Data.t
       ; password : 'k Expert.Password.Shared.t
       }
 
-    type ('a, 'b) f = { f : 'k. ('a, 'k) inner -> ('b, 'k) Expert.Data.Shared.t }
+    type 'a t = P : ('a, 'k) inner -> 'a t [@@unboxed]
 
-    let[@inline] with_ data { f } =
+    module Uncontended = struct
+      type ('a, 'k) t = ('a, 'k) inner =
+        { data : ('a shared, 'k) Data.t
+        ; password : 'k Expert.Password.Shared.t
+        }
+
+      type ('a, 'b) f = { f : 'k. ('a, 'k) inner -> ('b, 'k) Expert.Data.Shared.t }
+
+      let[@inline] with_ data { f } =
+        let (P access) = Access.current () in
+        let data = Data.wrap ~access { shared = data } in
+        let { many = { global = { aliased = data } } } =
+          Expert.Password.with_current access (fun [@inline] password ->
+            let password = Expert.Password.shared password in
+            { many =
+                Expert.Password.Shared.borrow password (fun [@inline] password ->
+                  { global = { aliased = f { data; password } } })
+            })
+        in
+        Expert.Data.Shared.unwrap ~access data
+      ;;
+
+      let[@inline] get { data; password } ~f =
+        Expert.Data.Shared.map_into data ~password ~f:(fun [@inline] { shared } ->
+          f shared)
+        [@nontail]
+      ;;
+
+      let[@inline] map { data; password } ~f =
+        { data =
+            Expert.Data.map_shared data ~password ~f:(fun [@inline] { shared } ->
+              { shared = f shared })
+        ; password
+        }
+      ;;
+    end
+
+    let[@inline] with_ data ~f =
       let (P access) = Access.current () in
       let data = Data.wrap ~access { shared = data } in
-      let { many = { global = { aliased = data } } } =
-        Expert.Password.with_current access (fun [@inline] password ->
-          let password = Expert.Password.shared password in
-          { many =
-              Expert.Password.Shared.borrow password (fun [@inline] password ->
-                { global = { aliased = f { data; password } } })
-          })
-      in
-      Expert.Data.Shared.unwrap ~access data
+      (Expert.Password.with_current access (fun [@inline] password ->
+         let password = Expert.Password.shared password in
+         { many =
+             Expert.Password.Shared.borrow password (fun [@inline] password ->
+               { global = { aliased = f (P { data; password }) } })
+         }))
+        .many
+        .global
+        .aliased
     ;;
 
-    let[@inline] get { data; password } ~f =
-      Expert.Data.Shared.map_into data ~password ~f:(fun [@inline] { shared } -> f shared)
-      [@nontail]
+    let[@inline] get (P t) ~f =
+      (Expert.Data.Shared.project
+         (Uncontended.get t ~f:(fun [@inline] a -> { portended = f a })))
+        .portended
     ;;
 
-    let[@inline] map { data; password } ~f =
-      { data =
-          Expert.Data.map_shared data ~password ~f:(fun [@inline] { shared } ->
-            { shared = f shared })
-      ; password
-      }
-    ;;
+    let iter = get
+    let[@inline] map (P t) ~f = P (Uncontended.map t ~f)
   end
-
-  let[@inline] with_ data ~f =
-    let (P access) = Access.current () in
-    let data = Data.wrap ~access { shared = data } in
-    (Expert.Password.with_current access (fun [@inline] password ->
-       let password = Expert.Password.shared password in
-       { many =
-           Expert.Password.Shared.borrow password (fun [@inline] password ->
-             { global = { aliased = f (P { data; password }) } })
-       }))
-      .many
-      .global
-      .aliased
-  ;;
-
-  let[@inline] get (P t) ~f =
-    (Expert.Data.Shared.project
-       (Uncontended.get t ~f:(fun [@inline] a -> { portended = f a })))
-      .portended
-  ;;
-
-  let iter = get
-  let[@inline] map (P t) ~f = P (Uncontended.map t ~f)
 end

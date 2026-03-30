@@ -1,12 +1,14 @@
 open! Base
 
-(** For now, see the [Capsule] library for documentation of capsule types.
+(** For now, see the {!Capsule_expert} library for high-level documentation of capsule
+    types.
 
-    This module provides an interface to capsules that is a small subset of [Capsule],
-    starting with the most common entry points. The interface is also cleaned up to be
-    somewhat easier to use, and more consistent with other conventions in [Base].
+    This module provides an interface to capsules that is a small subset of
+    [Capsule_expert], starting with the most common entry points. The interface is also
+    cleaned up to be somewhat easier to use, and more consistent with other conventions in
+    [Base].
 
-    Over time we will provide more of [Capsule]'s functionality. *)
+    Over time we will provide more of [Capsule_expert]'s functionality. *)
 module type Capsule = sig
   module Capsule := Capsule_expert
 
@@ -141,56 +143,56 @@ module type Capsule = sig
 
     (** Construct a new [t] by mapping a function over the referenced value. *)
     val map : 'a t -> f:('a -> 'b) -> 'b t
-  end
 
-  module Shared : sig
-    type ('a, 'k) inner =
-      { data : ('a shared, 'k) Data.t
-      ; password : 'k Capsule.Password.Shared.t
-      }
-
-    (** An encapsulated value that may be read for the duration of the current region.
-
-        A value of type ['a Shared.t] provides [shared] access to the underlying ['a] over
-        a local scope. A [forkable] ['a Shared.t] can be captured by functions that run on
-        other domains. *)
-    type 'a t = P : ('a, 'k) inner -> 'a t [@@unboxed]
-
-    (** [with_ a ~f] calls [f] with a [local forkable] {!Shared.t} representing local
-        read-only access to [a], which is readable in the current capsule. *)
-    val with_ : 'a 'b. 'a -> f:('a t -> 'b) -> 'b
-
-    (** [get t ~f] computes a value using data accessible via [t]. *)
-    val get : 'a 'b. 'a t -> f:('a -> 'b) -> 'b
-
-    (** Like [get], but for for functions that return [unit]. *)
-    val iter : 'a. 'a t -> f:('a -> unit) -> unit
-
-    (** Construct a new [t] by mapping a function over the referenced value. *)
-    val map : 'a 'b. 'a t -> f:('a -> 'b) -> 'b t
-
-    module Uncontended : sig
-      (** Like ['a Shared.t], but allows read-only computations to return an uncontended
-          result in the current capsule. *)
-      type ('a, 'k) t = ('a, 'k) inner =
+    module Shared : sig
+      type ('a, 'k) inner =
         { data : ('a shared, 'k) Data.t
         ; password : 'k Capsule.Password.Shared.t
         }
 
-      type ('a, 'b) f = { f : 'k. ('a, 'k) t -> ('b, 'k) Capsule.Data.Shared.t }
+      (** An encapsulated value that may be read for the duration of the current region.
 
-      (** [with_ a ~f] calls [f] with a [local forkable] {!Uncontended.t} representing
-          local read-only access to [a], which is readable in the current capsule.
+          A value of type ['a Shared.t] provides [shared] access to the underlying ['a]
+          over a local scope. A [forkable] ['a Shared.t] can be captured by functions that
+          run on other domains. *)
+      type 'a t = P : ('a, 'k) inner -> 'a t [@@unboxed]
 
-          The result of [f] is a [Capsule.Data.Shared.t], which can be unwrapped in the
-          current capsule. *)
-      val with_ : 'a -> ('a, 'b) f -> 'b
+      (** [with_ a ~f] calls [f] with a [local forkable] {!Shared.t} representing local
+          read-only access to [a], which is readable in the current capsule. *)
+      val with_ : 'a 'b. 'a -> f:('a t -> 'b) -> 'b
 
       (** [get t ~f] computes a value using data accessible via [t]. *)
-      val get : 'a 'b 'k. ('a, 'k) t -> f:('a -> 'b) -> ('b, 'k) Capsule.Data.Shared.t
+      val get : 'a 'b. 'a t -> f:('a -> 'b) -> 'b
+
+      (** Like [get], but for for functions that return [unit]. *)
+      val iter : 'a. 'a t -> f:('a -> unit) -> unit
 
       (** Construct a new [t] by mapping a function over the referenced value. *)
-      val map : 'a 'b 'k. ('a, 'k) t -> f:('a -> 'b) -> ('b, 'k) t
+      val map : 'a 'b. 'a t -> f:('a -> 'b) -> 'b t
+
+      module Uncontended : sig
+        (** Like ['a Shared.t], but allows read-only computations to return an uncontended
+            result in the current capsule. *)
+        type ('a, 'k) t = ('a, 'k) inner =
+          { data : ('a shared, 'k) Data.t
+          ; password : 'k Capsule.Password.Shared.t
+          }
+
+        type ('a, 'b) f = { f : 'k. ('a, 'k) t -> ('b, 'k) Capsule.Data.Shared.t }
+
+        (** [with_ a ~f] calls [f] with a [local forkable] {!Uncontended.t} representing
+            local read-only access to [a], which is readable in the current capsule.
+
+            The result of [f] is a [Capsule.Data.Shared.t], which can be unwrapped in the
+            current capsule. *)
+        val with_ : 'a -> ('a, 'b) f -> 'b
+
+        (** [get t ~f] computes a value using data accessible via [t]. *)
+        val get : 'a 'b 'k. ('a, 'k) t -> f:('a -> 'b) -> ('b, 'k) Capsule.Data.Shared.t
+
+        (** Construct a new [t] by mapping a function over the referenced value. *)
+        val map : 'a 'b 'k. ('a, 'k) t -> f:('a -> 'b) -> ('b, 'k) t
+      end
     end
   end
 
@@ -203,12 +205,7 @@ module type Capsule = sig
     type k = Capsule.initial
 
     (** Access to the initial capsule *)
-    val access : k Access.boxed
-
-    (** [with_access_opt ~f] calls [f (Some Initial.access)] if run on the initial domain,
-        or [f None] otherwise. *)
-    val%template with_access_opt : f:(k Access.boxed option -> 'r) -> 'r
-    [@@alloc a @ l = (heap_global, stack_local)]
+    val access : k Access.t
 
     module Data : sig
       (** A value in the initial capsule. *)
@@ -224,29 +221,6 @@ module type Capsule = sig
       (** Extract a value from a [Capsule.Data.t] for the initial capsule. This function
           is [nonportable], requiring it to be run from the initial domain. *)
       val unwrap : 'a t -> 'a]
-
-      [%%template:
-      [@@@alloc.default a @ l = (heap_global, stack_local)]
-
-      (** Attempt to extract a value from a [Capsule.Data.t] for the initial capsule by
-          passing it to a function [f] (which must return a portable value), if running on
-          the initial domain. If not run on the initial domain, returns [None]. *)
-      val get_opt : 'a 'b. 'a t -> f:('a -> 'b) -> 'b option
-
-      (** If called on the initial domain, [if_on_initial t ~f] calls [f] with the
-          contents of [t]. Otherwise, it does nothing. *)
-      val if_on_initial : 'a 'b. 'a t -> f:('a -> unit) -> unit
-
-      (** If called on the initial domain, [if_on_initial t ~f] calls [f] with the
-          contents of [t]. Otherwise, it does nothing. *)
-      val if_on_initial_domain : 'a 'b. 'a t -> f:('a -> unit) -> unit
-
-      (** If running on the initial domain, calls [f] with the value inside a
-          [Capsule.Initial.Data.t]. Otherwise, raises. *)
-      val get_exn : 'a 'b. 'a t -> f:('a -> 'b) -> 'b
-
-      (** A version of [get_exn] specialized to functions that return [unit] *)
-      val iter_exn : 'a 'b. 'a t -> f:('a -> unit) -> unit]
     end
   end
 end
