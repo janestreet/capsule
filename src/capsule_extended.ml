@@ -37,10 +37,8 @@ module Data = struct
   let wrap = Expert.Data.Local.wrap
   let unwrap = Expert.Data.Local.unwrap
   let[@mode local shared] unwrap = Expert.Data.Local.unwrap_shared
-  let[@mode local unique] unwrap = Expert.Data.Local.unwrap_unique
   let return = Expert.Data.Local.inject
   let get_id = Expert.Data.Local.project
-  let project_shared = Expert.Data.Local.project_shared
   let both = Expert.Data.Local.both
   let fst = Expert.Data.Local.fst
   let snd = Expert.Data.Local.snd]
@@ -65,84 +63,112 @@ module Initial = struct
   end
 end
 
-module Isolated = struct
-  type%template ('a, 'k) inner =
-    { data : ('a, 'k) Data.t
-    ; key : 'k Expert.Key.t
-    }
-  [@@modality.explicit u = (unique, aliased)]
+module%template Isolated = struct
+  module Repr = struct
+    type ('a, 'k) inner =
+      { data : ('a, 'k) Data.t
+      ; key : 'k Expert.Key.t
+      }
 
-  type%template ('a, 'k) inner = (('a, 'k) inner[@modality.explicit aliased])
-
-  include%template struct
-    [@@@mode.default u = (unique, aliased)]
-
-    type 'a t = P : (('a, 'k) inner[@mode u]) -> ('a t[@mode u]) [@@unboxed]
-    type 'a boxed
-
-    external unsafe_box : ('a, 'k) Data.t -> ('a boxed[@mode u]) = "%identity"
-    external unsafe_unbox : ('a boxed[@mode u]) -> ('a, 'k) Data.t = "%identity"
-    external unsafe_box_aliased : ('a, 'k) Data.t -> ('a boxed[@mode u]) = "%identity"
-    external unsafe_unbox_aliased : ('a boxed[@mode u]) -> ('a, 'k) Data.t = "%identity"
-
-    let box (P { data; key = _ }) = (unsafe_box [@mode u]) data
-
-    let unbox boxed : (_ t[@mode u]) =
-      let (P key) = Expert.create () in
-      let data = (unsafe_unbox [@mode u]) boxed in
-      P { data; key }
-    ;;
-
-    let box_aliased (P { data; key = _ }) = (unsafe_box_aliased [@mode u]) data
-
-    let unbox_aliased boxed : (_ t[@mode u]) =
-      let (P key) = Expert.create () in
-      let data = (unsafe_unbox_aliased [@mode u]) boxed in
-      P { data; key }
-    ;;
-
-    let create f : (_ t[@mode u]) =
-      let (P key) = Expert.create () in
-      let data = (Data.create [@mode u]) f in
-      P { key; data }
-    ;;
-
-    let with_shared_gen (P { key; data }) ~f =
-      (Expert.Key.access_shared key ~f:(fun access ->
-         { aliased = { many = f (Expert.Data.unwrap_shared ~access data) } })
-      [@nontail])
-        .aliased
-        .many
-    ;;
-
-    let with_shared = (with_shared_gen [@mode u])
-
-    [@@@mode.default l = (global, local)]
-
-    let unwrap (P { key; data } : (_ t[@mode u])) =
-      let access = Expert.Key.destroy key in
-      (Data.unwrap [@mode l u]) ~access data [@exclave_if_local l]
-    ;;
-
-    let unwrap_shared (P { key; data } : (_ t[@mode u])) =
-      (Data.project_shared [@mode l]) ~key data [@exclave_if_local l]
-    ;;
+    type 'a t = P : ('a, 'k) inner -> 'a t [@@unboxed]
   end
 
-  let get_id (P { data; key }) = P { data; key }, { aliased = Data.get_id data }
+  (* We use this type declaration just as justification for the kind annotation on ['a t]. *)
+  type ('a, 'k) _inner = ('a, 'k) Repr.inner
+  type 'a t
 
-  let with_unique_gen (P { key; data }) ~f =
-    let result, key =
-      Expert.Key.access key ~f:(fun access ->
-        { many = f (Expert.Data.unwrap ~access data) })
-    in
-    P { key; data }, result.many
+  [@@@mode.default.explicit u = (unique, aliased)]
+
+  external unsafe_to_data
+    :  ('a t[@local_opt])
+    -> (('a, 'k) Data.t[@local_opt])
+    = "%identity"
+
+  external unsafe_of_data
+    :  (('a, 'k) Data.t[@local_opt])
+    -> ('a t[@local_opt])
+    = "%identity"
+
+  let to_repr t =
+    let (P key) = Expert.create () in
+    let data = (unsafe_to_data [@mode.explicit u]) t in
+    Repr.P { data; key }
   ;;
 
-  let with_unique t ~f = with_unique_gen t ~f:(fun x -> { aliased = f x }) [@nontail]
+  let of_repr (Repr.P { data; key = _ }) = (unsafe_of_data [@mode.explicit u]) data
 end
 
-module Guard = struct
+module%template Frozen = struct
+  type 'a t = 'a portable Isolated.t
+
+  let to_repr = (Isolated.to_repr [@mode.explicit aliased])
+  let of_repr = (Isolated.of_repr [@mode.explicit aliased])
+
+  let create f =
+    let (P key) = Expert.create () in
+    let data = Data.create (fun () -> { portable = f () }) in
+    of_repr (P { key; data })
+  ;;
+
+  let unwrap t =
+    let (P { key; data }) = to_repr t in
+    (Data.project_shared ~key data).portable
+  ;;
+end
+
+module%template Owned = struct
+  type 'a t = 'a Isolated.t
+
+  let to_repr = (Isolated.to_repr [@mode.explicit unique])
+  let of_repr = (Isolated.of_repr [@mode.explicit unique])
+
+  let create f =
+    let (P key) = Expert.create () in
+    let data = (Data.create [@mode unique]) f in
+    of_repr (P { key; data })
+  ;;
+
+  let freeze t =
+    let open struct
+      (*_ Safe because ['a = 'a portable] for ('a : value mod portable) *)
+      external wrap_portable
+        : 'a 'k.
+        ('a, 'k) Expert.Data.t -> ('a portable, 'k) Expert.Data.t
+        = "%identity"
+    end in
+    let (P { data; key }) = (Isolated.to_repr [@mode.explicit aliased]) t in
+    let data = wrap_portable data in
+    (Isolated.of_repr [@mode.explicit aliased]) (P { data; key })
+  ;;
+
+  let unwrap t =
+    let (P { key; data }) = to_repr t in
+    let access = Expert.Key.destroy key in
+    (Data.unwrap [@mode unique]) ~access data
+  ;;
+
+  let dup (type a) (t : a) : a * a = t, t
+
+  let get_contended (type a) (t : a t) : a t * a =
+    let (P { data; key }) = to_repr t in
+    let data, data' = dup data in
+    let t = of_repr (P { data; key }) in
+    t, Data.get_id data'
+  ;;
+
+  let with_ (type a) (t : a t) ~f =
+    let (P { key; data }) = to_repr t in
+    let data, data' = dup data in
+    let result, key =
+      Expert.Key.access key ~f:(fun access ->
+        { many = f (Expert.Data.unwrap ~access data') })
+    in
+    let t = of_repr (P { key; data }) in
+    t, result.many
+  ;;
+end
+
+module Scoped = struct
   type ('a, 'k) inner =
     { data : ('a, 'k) Data.t
     ; password : 'k Expert.Password.t
